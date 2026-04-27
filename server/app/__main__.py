@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from openai import OpenAI
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 import app.models as models
@@ -44,23 +44,25 @@ AI_SYSTEM_PROMPT = (
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
-        db.execute(
-            insert(models.Document),
-            [
-                {"id": document["id"], "title": document["title"]}
-                for document in SEED_DOCUMENTS
-            ],
-        )
-        db.add_all(
-            [
-                models.DocumentVersion(
-                    document_id=document["id"],
-                    content=document["content"],
-                    version=1,
+        for document in SEED_DOCUMENTS:
+            saved_document = db.get(models.Document, document["id"])
+            if saved_document is None:
+                db.add(models.Document(id=document["id"], title=document["title"]))
+
+            first_version = db.scalar(
+                select(models.DocumentVersion).where(
+                    models.DocumentVersion.document_id == document["id"],
+                    models.DocumentVersion.version == 1,
                 )
-                for document in SEED_DOCUMENTS
-            ]
-        )
+            )
+            if first_version is None:
+                db.add(
+                    models.DocumentVersion(
+                        document_id=document["id"],
+                        content=document["content"],
+                        version=1,
+                    )
+                )
         db.commit()
     yield
 

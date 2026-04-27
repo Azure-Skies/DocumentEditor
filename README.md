@@ -67,3 +67,5 @@ You may use AI (and the API key we have provided) to assist with coding on this 
 If your submission passes our review, the next stage will involve pair programming without AI assistance.
 
 Good luck!
+
+Implemented document versioning with create, switch, and update flows, plus an AI Writer panel that can answer questions, edit the selected document version, persist chat history, and use uploaded .txt files as context. I also hardened persistence and startup seeding, added safeguards around document switching and context uploads, and added focused backend tests for versioning and AI message behavior.

@@ -1,7 +1,10 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+MAX_CONTEXT_FILES = 5
+MAX_CONTEXT_FILE_CHARS = 20_000
 
 
 class DocumentVersionBase(BaseModel):
@@ -27,8 +30,8 @@ class DocumentVersionsRead(DocumentVersionBase):
 
 
 class AIContextFile(BaseModel):
-    name: str
-    content: str
+    name: str = Field(min_length=1, max_length=255)
+    content: str = Field(max_length=MAX_CONTEXT_FILE_CHARS)
 
 
 class AIChatMessage(BaseModel):
@@ -49,6 +52,16 @@ class AIWriteRequest(BaseModel):
     content: str
     history: list[AIChatMessage] = Field(default_factory=list)
     context_files: list[AIContextFile] = Field(default_factory=list)
+
+    @field_validator("context_files")
+    @classmethod
+    def limit_context_files(
+        cls, context_files: list[AIContextFile]
+    ) -> list[AIContextFile]:
+        if len(context_files) > MAX_CONTEXT_FILES:
+            raise ValueError(f"Upload at most {MAX_CONTEXT_FILES} context files")
+
+        return context_files
 
 
 class AIWriteResponse(BaseModel):

@@ -21,7 +21,9 @@ import UpdateIcon from "@mui/icons-material/PublishedWithChanges";
 import LoadingOverlay from "./LoadingOverlay";
 import Logo from "./assets/logo.png";
 
-const BACKEND_URL = "http://127.0.0.1:8000";
+const BACKEND_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const MAX_CONTEXT_FILES = 5;
+const MAX_CONTEXT_FILE_BYTES = 20000;
 
 type PatentDocument = {
   id: number;
@@ -65,6 +67,7 @@ function App() {
   const [patentDocuments, setPatentDocuments] = useState<PatentDocument[]>([]);
   const [versions, setVersions] = useState<DocumentVersion[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isDocumentLoading, setIsDocumentLoading] = useState<boolean>(false);
   const [isLeftPanelOpen, setIsLeftPanelOpen] = useState<boolean>(true);
   const [isRightPanelOpen, setIsRightPanelOpen] = useState<boolean>(true);
   const [aiMessages, setAiMessages] = useState<AIChatMessage[]>([]);
@@ -74,6 +77,7 @@ function App() {
   const [isDraggingContext, setIsDraggingContext] = useState<boolean>(false);
   const [, setStatusMessage] = useState<string>("");
   const contextFileInputRef = useRef<HTMLInputElement | null>(null);
+  const documentLoadRequestRef = useRef<number>(0);
 
   useEffect(() => {
     loadPatentDocuments();
@@ -97,7 +101,9 @@ function App() {
 
   // Callback to load a patent from the backend
   const loadPatent = async (documentNumber: number) => {
-    setCurrentDocumentId(documentNumber);
+    const requestId = documentLoadRequestRef.current + 1;
+    documentLoadRequestRef.current = requestId;
+    setIsDocumentLoading(true);
     setStatusMessage(`Loading Patent ${documentNumber}...`);
     console.log("Loading patent:", documentNumber);
     try {
@@ -108,6 +114,11 @@ function App() {
         ),
       ]);
 
+      if (requestId !== documentLoadRequestRef.current) {
+        return;
+      }
+
+      setCurrentDocumentId(documentNumber);
       setCurrentDocumentContent(documentResponse.data.content);
       setCurrentDocumentTitle(documentResponse.data.title);
       setSavedDocumentTitle(documentResponse.data.title);
@@ -120,11 +131,15 @@ function App() {
     } catch (error) {
       console.error("Error loading document:", error);
       setStatusMessage(`Could not load Patent ${documentNumber}`);
+    } finally {
+      if (requestId === documentLoadRequestRef.current) {
+        setIsDocumentLoading(false);
+      }
     }
   };
 
   const saveTitle = async () => {
-    if (!currentDocumentId || !currentVersionId) {
+    if (isDocumentLoading || !currentDocumentId || !currentVersionId) {
       return;
     }
 
@@ -139,11 +154,18 @@ function App() {
   };
 
   const loadVersion = async (documentNumber: number, versionId: number) => {
+    const requestId = documentLoadRequestRef.current + 1;
+    documentLoadRequestRef.current = requestId;
+    setIsDocumentLoading(true);
     setStatusMessage("Loading version...");
     try {
       const response = await axios.get<DocumentVersion>(
         `${BACKEND_URL}/document/${documentNumber}/version/${versionId}`
       );
+
+      if (requestId !== documentLoadRequestRef.current) {
+        return;
+      }
 
       setCurrentDocumentContent(response.data.content);
       setCurrentDocumentTitle(response.data.title);
@@ -155,6 +177,10 @@ function App() {
     } catch (error) {
       console.error("Error loading document version:", error);
       setStatusMessage("Could not load that version");
+    } finally {
+      if (requestId === documentLoadRequestRef.current) {
+        setIsDocumentLoading(false);
+      }
     }
   };
 
@@ -189,7 +215,7 @@ function App() {
 
   // Callback to persist a patent in the DB
   const savePatent = async (documentNumber: number) => {
-    if (!documentNumber) {
+    if (isDocumentLoading || !documentNumber) {
       return;
     }
 
@@ -221,7 +247,7 @@ function App() {
     documentNumber: number,
     title = currentDocumentTitle
   ) => {
-    if (!documentNumber || !currentVersionId) {
+    if (isDocumentLoading || !documentNumber || !currentVersionId) {
       return;
     }
 
@@ -259,7 +285,7 @@ function App() {
     if (!instruction || isAiLoading) {
       return;
     }
-    if (!currentDocumentId || !currentVersionId) {
+    if (isDocumentLoading || !currentDocumentId || !currentVersionId) {
       setStatusMessage("Load a patent before asking AI to edit");
       return;
     }
@@ -341,6 +367,11 @@ function App() {
   };
 
   const addContextFiles = async (files: FileList | File[]) => {
+    if (aiContextFiles.length >= MAX_CONTEXT_FILES) {
+      setStatusMessage(`Upload at most ${MAX_CONTEXT_FILES} context files`);
+      return;
+    }
+
     const textFiles = Array.from(files).filter(
       (file) => file.type === "text/plain" || file.name.endsWith(".txt")
     );
@@ -349,9 +380,20 @@ function App() {
       return;
     }
 
+    const availableSlots = MAX_CONTEXT_FILES - aiContextFiles.length;
+    const acceptedFiles = textFiles
+      .filter((file) => file.size <= MAX_CONTEXT_FILE_BYTES)
+      .slice(0, availableSlots);
+    if (acceptedFiles.length === 0) {
+      setStatusMessage(
+        `.txt files must be ${MAX_CONTEXT_FILE_BYTES.toLocaleString()} bytes or fewer`
+      );
+      return;
+    }
+
     try {
       const loadedFiles = await Promise.all(
-        textFiles.map(
+        acceptedFiles.map(
           (file) =>
             new Promise<AIContextFile>((resolve, reject) => {
               const reader = new FileReader();
@@ -416,7 +458,9 @@ function App() {
       }).format(new Date(selectedVersion.updated_at))
     : "";
   const versionMetadataLabel =
-    selectedVersion && lastUpdatedLabel ? `Last updated ${lastUpdatedLabel}` : "";
+    selectedVersion && lastUpdatedLabel
+      ? `Version ${selectedVersion.version}, Last updated ${lastUpdatedLabel}`
+      : "";
 
   return (
     <Box
@@ -427,7 +471,7 @@ function App() {
         width: "100%",
       }}
     >
-      {isLoading && <LoadingOverlay />}
+      {(isLoading || isDocumentLoading) && <LoadingOverlay />}
       <Box
         component="header"
         sx={{
@@ -516,9 +560,10 @@ function App() {
                   px: 1.5,
                 }}
               >
-              {patentDocuments.map((patentDocument) => (
-                <Box
+                {patentDocuments.map((patentDocument) => (
+                  <Box
                     component="button"
+                    disabled={isDocumentLoading}
                     key={patentDocument.id}
                     onClick={() => loadPatent(patentDocument.id)}
                     sx={{
@@ -531,6 +576,10 @@ function App() {
                       p: "8px",
                       textAlign: "left",
                       transition: "background-color 0.2s ease, color 0.2s ease",
+                      "&:disabled": {
+                        cursor: "default",
+                        opacity: 0.6,
+                      },
                       "&:hover": {
                         bgcolor: "#c7d2fe",
                         color: "#1e1b4b",
@@ -538,10 +587,10 @@ function App() {
                     }}
                     type="button"
                   >
-                  {patentDocument.title}
-                </Box>
-              ))}
-            </Box>
+                    {patentDocument.title}
+                  </Box>
+                ))}
+              </Box>
             </>
           )}
         </Box>
@@ -583,6 +632,7 @@ function App() {
                     event.currentTarget.blur();
                   }
                 }}
+                disabled={isDocumentLoading}
                 sx={{
                   bgcolor: "transparent",
                   border: 0,
@@ -623,6 +673,7 @@ function App() {
               <FormControl size="small" sx={{ minWidth: 132 }}>
                 <Select
                   aria-label="Version"
+                  disabled={isDocumentLoading}
                   displayEmpty
                   onChange={selectVersion}
                   value={currentVersionId ?? ""}
@@ -641,7 +692,9 @@ function App() {
                 <span>
                   <IconButton
                     aria-label="Update selected version"
-                    disabled={!currentDocumentId || !currentVersionId}
+                    disabled={
+                      isDocumentLoading || !currentDocumentId || !currentVersionId
+                    }
                     onClick={() => updateCurrentVersion(currentDocumentId)}
                     size="small"
                   >
@@ -653,7 +706,7 @@ function App() {
                 <span>
                   <IconButton
                     aria-label="Save new version"
-                    disabled={!currentDocumentId}
+                    disabled={isDocumentLoading || !currentDocumentId}
                     onClick={() => savePatent(currentDocumentId)}
                     size="small"
                   >
@@ -898,6 +951,12 @@ function App() {
                   event.preventDefault();
                   setIsDraggingContext(true);
                 }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    contextFileInputRef.current?.click();
+                  }
+                }}
                 onDrop={(event) => {
                   event.preventDefault();
                   setIsDraggingContext(false);
@@ -957,7 +1016,9 @@ function App() {
                     <span>
                       <IconButton
                         aria-label="Send AI message"
-                        disabled={!aiInput.trim() || isAiLoading}
+                        disabled={
+                          isDocumentLoading || !aiInput.trim() || isAiLoading
+                        }
                         onClick={sendAiMessage}
                         size="small"
                       >

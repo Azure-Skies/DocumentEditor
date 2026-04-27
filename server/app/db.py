@@ -1,14 +1,16 @@
-from sqlalchemy import StaticPool, create_engine
+import os
+
+from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-DATABASE_URL = "sqlite:///:memory:"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args=connect_args,
     echo=False,  # You can set this to True to see the SQL queries made by SQLAlchemy
-    poolclass=StaticPool,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -21,4 +23,3 @@ def get_db():
         yield db
     finally:
         db.close()
-
