@@ -14,6 +14,7 @@ import ChatIcon from "@mui/icons-material/Chat";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import CloseIcon from "@mui/icons-material/Close";
+import DeleteIcon from "@mui/icons-material/Delete";
 import SaveIcon from "@mui/icons-material/Save";
 import SendIcon from "@mui/icons-material/Send";
 import UpdateIcon from "@mui/icons-material/PublishedWithChanges";
@@ -70,6 +71,7 @@ function App() {
   const [aiInput, setAiInput] = useState<string>("");
   const [aiContextFiles, setAiContextFiles] = useState<AIContextFile[]>([]);
   const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
+  const [isDraggingContext, setIsDraggingContext] = useState<boolean>(false);
   const [, setStatusMessage] = useState<string>("");
   const contextFileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -118,25 +120,6 @@ function App() {
     } catch (error) {
       console.error("Error loading document:", error);
       setStatusMessage(`Could not load Patent ${documentNumber}`);
-    }
-  };
-
-  const addPatent = async () => {
-    setIsLoading(true);
-    setStatusMessage("Creating patent...");
-    try {
-      const nextPatentNumber = patentDocuments.length + 1;
-      const response = await axios.post<DocumentVersion>(`${BACKEND_URL}/documents`, {
-        title: `Patent ${nextPatentNumber}`,
-      });
-      await loadPatentDocuments();
-      await loadPatent(response.data.document_id);
-      setStatusMessage(`Created ${response.data.title}`);
-    } catch (error) {
-      console.error("Error creating patent:", error);
-      setStatusMessage("Could not create patent");
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -404,6 +387,25 @@ function App() {
     );
   };
 
+  const clearAiChat = async () => {
+    setAiContextFiles([]);
+    if (!currentDocumentId || !currentVersionId) {
+      setAiMessages([]);
+      return;
+    }
+
+    try {
+      await axios.delete(
+        `${BACKEND_URL}/document/${currentDocumentId}/version/${currentVersionId}/ai/messages`
+      );
+      setAiMessages([]);
+      setStatusMessage("AI chat cleared");
+    } catch (error) {
+      console.error("Error clearing AI chat:", error);
+      setStatusMessage("Could not clear AI chat");
+    }
+  };
+
   const selectedVersion = versions.find(
     (documentVersion) => documentVersion.id === currentVersionId
   );
@@ -510,11 +512,12 @@ function App() {
                   flex: 1,
                   flexDirection: "column",
                   gap: 1,
+                  pt: 1,
                   px: 1.5,
                 }}
               >
-                {patentDocuments.map((patentDocument) => (
-                  <Box
+              {patentDocuments.map((patentDocument) => (
+                <Box
                     component="button"
                     key={patentDocument.id}
                     onClick={() => loadPatent(patentDocument.id)}
@@ -525,7 +528,7 @@ function App() {
                       cursor: "pointer",
                       fontSize: "0.875rem",
                       minWidth: "100%",
-                      p: "8px 16px",
+                      p: "8px",
                       textAlign: "left",
                       transition: "background-color 0.2s ease, color 0.2s ease",
                       "&:hover": {
@@ -535,36 +538,10 @@ function App() {
                     }}
                     type="button"
                   >
-                    {patentDocument.title}
-                  </Box>
-                ))}
-              </Box>
-              <Box
-                sx={{ display: "flex", justifyContent: "center", p: 1.5 }}
-              >
-                <Box
-                  component="button"
-                  disabled={isLoading}
-                  onClick={addPatent}
-                  sx={{
-                    bgcolor: "#ffffff",
-                    border: "1px solid #d1d5db",
-                    borderRadius: "5px",
-                    color: "#213547",
-                    cursor: "pointer",
-                    fontSize: "0.875rem",
-                    fontWeight: 400,
-                    p: "8px 12px",
-                    textAlign: "center",
-                    "&:hover": {
-                      bgcolor: "#f1f5f9",
-                    },
-                  }}
-                  type="button"
-                >
-                  Add new patent
+                  {patentDocument.title}
                 </Box>
-              </Box>
+              ))}
+            </Box>
             </>
           )}
         </Box>
@@ -736,11 +713,27 @@ function App() {
                   fontSize: "0.875rem",
                   fontWeight: 600,
                   gap: 1,
+                  flex: 1,
                 }}
               >
                 <ChatIcon fontSize="small" />
                 AI Writer
               </Box>
+            )}
+            {isRightPanelOpen && (
+              <Tooltip title="Clear AI chat">
+                <span>
+                  <IconButton
+                    aria-label="Clear AI chat"
+                    disabled={isAiLoading}
+                    onClick={clearAiChat}
+                    size="small"
+                    sx={{ px: 2 }}
+                  >
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
             )}
           </Box>
           {isRightPanelOpen && (
@@ -808,9 +801,15 @@ function App() {
                             >
                               <AttachFileIcon sx={{ fontSize: 16 }} />
                               <Box
-                                component="span"
+                                component="a"
+                                download={file.name}
+                                href={`data:text/plain;charset=utf-8,${encodeURIComponent(
+                                  file.content
+                                )}`}
                                 sx={{
+                                  color: "inherit",
                                   overflow: "hidden",
+                                  textDecoration: "underline",
                                   textOverflow: "ellipsis",
                                   whiteSpace: "nowrap",
                                 }}
@@ -833,9 +832,9 @@ function App() {
                   <Box
                     sx={{
                       alignItems: "center",
-                      bgcolor: "#ffffff",
+                      bgcolor: "transparent",
                       borderRadius: "6px",
-                      boxShadow: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
+                      boxShadow: "none",
                       color: "#213547",
                       display: "flex",
                       fontSize: "0.875rem",
@@ -892,6 +891,49 @@ function App() {
                   ))}
                 </Box>
               )}
+              <Box
+                onClick={() => contextFileInputRef.current?.click()}
+                onDragLeave={() => setIsDraggingContext(false)}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setIsDraggingContext(true);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setIsDraggingContext(false);
+                  addContextFiles(event.dataTransfer.files);
+                }}
+                role="button"
+                sx={{
+                  alignItems: "center",
+                  bgcolor: isDraggingContext ? "#eef2ff" : "#ffffff",
+                  border: "1px dashed",
+                  borderColor: isDraggingContext ? "#646cff" : "#cbd5e1",
+                  borderRadius: "6px",
+                  color: isDraggingContext ? "#312e81" : "#475569",
+                  cursor: "pointer",
+                  display: "flex",
+                  fontSize: "0.8125rem",
+                  gap: 0.75,
+                  justifyContent: "center",
+                  p: 1,
+                }}
+                tabIndex={0}
+              >
+                <AttachFileIcon sx={{ fontSize: 16 }} />
+                Drop .txt files for AI context
+              </Box>
+              <input
+                accept=".txt,text/plain"
+                hidden
+                multiple
+                onChange={(event) => {
+                  uploadContextFiles(event.target.files);
+                  event.target.value = "";
+                }}
+                ref={contextFileInputRef}
+                type="file"
+              />
               <Box sx={{ alignItems: "flex-end", display: "flex", gap: 0.5 }}>
                 <TextField
                   disabled={isAiLoading}
@@ -911,29 +953,6 @@ function App() {
                   value={aiInput}
                 />
                 <Box sx={{ display: "flex", flexDirection: "column" }}>
-                  <input
-                    accept=".txt,text/plain"
-                    hidden
-                    multiple
-                    onChange={(event) => {
-                      uploadContextFiles(event.target.files);
-                      event.target.value = "";
-                    }}
-                    ref={contextFileInputRef}
-                    type="file"
-                  />
-                  <Tooltip title="Upload context file">
-                    <span>
-                      <IconButton
-                        aria-label="Upload context file"
-                        disabled={isAiLoading}
-                        onClick={() => contextFileInputRef.current?.click()}
-                        size="small"
-                      >
-                        <AttachFileIcon />
-                      </IconButton>
-                    </span>
-                  </Tooltip>
                   <Tooltip title="Send">
                     <span>
                       <IconButton

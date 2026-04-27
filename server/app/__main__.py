@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from openai import OpenAI
-from sqlalchemy import insert, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session
 
 import app.models as models
@@ -24,16 +24,19 @@ SEED_DOCUMENTS = [
 
 AI_SYSTEM_PROMPT = (
     "You are a careful patent drafting assistant. Modify the provided "
-    "HTML document only when the user asks you to edit, rewrite, draft, "
+    "document only when the user asks you to edit, rewrite, draft, "
     "delete, add, update, or otherwise change the document. If the user "
     "asks a question, asks for an explanation, or asks for analysis, answer "
-    "without changing the document. Preserve valid HTML and claim numbering "
+    "without changing the document. Preserve document formatting and claim numbering "
     "unless the user explicitly asks to change structure. Use uploaded "
     "context files when relevant. Return JSON with keys 'action', 'reply', "
     "and 'content'. The 'action' must be either 'answer' or 'edit'. The "
-    "'reply' is a concise response to the user. The 'content' is the complete "
-    "HTML document; for answer-only requests it must be exactly the current "
-    "HTML content unchanged."
+    "'reply' is a concise, plain-language response to the user. Do not mention "
+    "technical implementation details such as HTML, JSON, tags, markup, schemas, "
+    "or internal formatting unless the user explicitly asks about them. The "
+    "'content' is the complete updated document in the same internal format you "
+    "received; for answer-only requests it must be exactly the current content "
+    "unchanged."
 )
 
 
@@ -214,28 +217,6 @@ def get_documents(db: Session = Depends(get_db)) -> list[schemas.DocumentRead]:
     return list(db.scalars(select(models.Document).order_by(models.Document.id)))
 
 
-@app.post("/documents")
-def create_document(
-    document: schemas.DocumentCreate,
-    db: Session = Depends(get_db),
-) -> schemas.DocumentVersionsRead:
-    """Create a document with an initial blank version."""
-    title = document.title.strip() or "Untitled Patent"
-    saved_document = models.Document(title=title)
-    db.add(saved_document)
-    db.flush()
-
-    document_version = models.DocumentVersion(
-        document_id=saved_document.id,
-        content="<p></p>",
-        version=1,
-    )
-    db.add(document_version)
-    db.commit()
-    db.refresh(document_version)
-    return serialize_document_version(db, document_version)
-
-
 @app.get("/document/{document_id}")
 def get_document(
     document_id: int, db: Session = Depends(get_db)
@@ -309,6 +290,23 @@ def get_version_ai_messages(
     """Get persisted AI chat messages for a document version."""
     get_document_version_or_404(db, document_id, version_id)
     return get_ai_messages(db, version_id)
+
+
+@app.delete("/document/{document_id}/version/{version_id}/ai/messages")
+def clear_version_ai_messages(
+    document_id: int,
+    version_id: int,
+    db: Session = Depends(get_db),
+) -> list[schemas.AIMessageRead]:
+    """Delete persisted AI chat messages for a document version."""
+    get_document_version_or_404(db, document_id, version_id)
+    db.execute(
+        delete(models.AIMessage).where(
+            models.AIMessage.document_version_id == version_id
+        )
+    )
+    db.commit()
+    return []
 
 
 @app.get("/document/{document_id}/version/{version_id}")
