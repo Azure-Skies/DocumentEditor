@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import os
 import tempfile
 import unittest
@@ -11,50 +12,125 @@ from fastapi.testclient import TestClient
 import app.__main__ as api
 
 
+@contextmanager
+def mocked_ai_response(action="answer", reply="AI reply", content=None):
+    original_generate_ai_response = api.generate_ai_response
+
+    def generate_ai_response(request):
+        return api.schemas.AIActionResponse(
+            action=action,
+            reply=reply,
+            content=request.content if content is None else content,
+        )
+
+    api.generate_ai_response = generate_ai_response
+    try:
+        yield
+    finally:
+        api.generate_ai_response = original_generate_ai_response
+
+
+def latest_version(client, document_id=1):
+    response = client.get(f"/document/{document_id}")
+    response.raise_for_status()
+    return response.json()
+
+
 class ApiTestCase(unittest.TestCase):
     def setUp(self):
         api.Base.metadata.drop_all(bind=api.engine)
 
-    def test_version_lifecycle(self):
+    def test_get_documents(self):
         with TestClient(api.app) as client:
-            documents = client.get("/documents")
-            self.assertEqual(documents.status_code, 200)
-            self.assertEqual(len(documents.json()), 2)
+            response = client.get("/documents")
 
-            first_version = client.get("/document/1").json()
-            self.assertEqual(first_version["version"], 1)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.json(),
+                [{"id": 1, "title": "Patent 1"}, {"id": 2, "title": "Patent 2"}],
+            )
 
-            new_version = client.post(
+    def test_get_document_returns_latest_version(self):
+        with TestClient(api.app) as client:
+            client.post(
                 "/save/1",
                 json={"title": "Patent 1", "content": "<p>new draft</p>"},
             )
-            self.assertEqual(new_version.status_code, 200)
-            self.assertEqual(new_version.json()["version"], 2)
 
-            update = client.put(
-                f"/document/1/version/{first_version['id']}",
+            response = client.get("/document/1")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["version"], 2)
+            self.assertEqual(response.json()["content"], "<p>new draft</p>")
+
+    def test_get_document_versions(self):
+        with TestClient(api.app) as client:
+            client.post(
+                "/save/1",
+                json={"title": "Patent 1", "content": "<p>new draft</p>"},
+            )
+
+            response = client.get("/document/1/versions")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual([version["version"] for version in response.json()], [2, 1])
+
+    def test_get_document_version(self):
+        with TestClient(api.app) as client:
+            version = latest_version(client)
+
+            response = client.get(f"/document/1/version/{version['id']}")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["id"], version["id"])
+            self.assertEqual(response.json()["version"], 1)
+
+    def test_save_creates_new_version(self):
+        with TestClient(api.app) as client:
+            response = client.post(
+                "/save/1",
+                json={"title": "Patent 1", "content": "<p>new draft</p>"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["version"], 2)
+            self.assertEqual(response.json()["content"], "<p>new draft</p>")
+
+    def test_update_version_updates_selected_version(self):
+        with TestClient(api.app) as client:
+            version = latest_version(client)
+
+            response = client.put(
+                f"/document/1/version/{version['id']}",
                 json={"title": "Patent 1", "content": "<p>updated old draft</p>"},
             )
-            self.assertEqual(update.status_code, 200)
-            self.assertEqual(update.json()["content"], "<p>updated old draft</p>")
 
-            latest = client.get("/document/1").json()
-            self.assertEqual(latest["version"], 2)
-            self.assertEqual(latest["content"], "<p>new draft</p>")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["content"], "<p>updated old draft</p>")
+            self.assertEqual(latest_version(client)["content"], "<p>updated old draft</p>")
 
-    def test_ai_answer_persists_messages_without_editing_document(self):
-        def answer_response(request):
-            return api.schemas.AIActionResponse(
-                action="answer",
-                reply="Claim 1 is broad.",
-                content=request.content,
-            )
-
-        original_generate_ai_response = api.generate_ai_response
-        api.generate_ai_response = answer_response
-        try:
+    def test_ai_write_route_returns_generated_content(self):
+        with mocked_ai_response(content="<p>suggested draft</p>"):
             with TestClient(api.app) as client:
-                version = client.get("/document/1").json()
+                response = client.post(
+                    "/ai/write",
+                    json={
+                        "instruction": "Rewrite claim 1",
+                        "title": "Patent 1",
+                        "content": "<p>original</p>",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json(),
+                    {"reply": "AI reply", "content": "<p>suggested draft</p>"},
+                )
+
+    def test_ai_write_answer_persists_messages_without_editing_document(self):
+        with mocked_ai_response(action="answer", reply="Claim 1 is broad."):
+            with TestClient(api.app) as client:
+                version = latest_version(client)
                 response = client.post(
                     f"/document/1/version/{version['id']}/ai/write",
                     json={
@@ -81,22 +157,13 @@ class ApiTestCase(unittest.TestCase):
                     response.json()["messages"][0]["context_files"][0]["name"],
                     "prior-art.txt",
                 )
-        finally:
-            api.generate_ai_response = original_generate_ai_response
 
-    def test_ai_edit_updates_selected_version(self):
-        def edit_response(_request):
-            return api.schemas.AIActionResponse(
-                action="edit",
-                reply="Updated claim 1.",
-                content="<p>edited by ai</p>",
-            )
-
-        original_generate_ai_response = api.generate_ai_response
-        api.generate_ai_response = edit_response
-        try:
+    def test_ai_write_edit_updates_selected_version(self):
+        with mocked_ai_response(
+            action="edit", reply="Updated claim 1.", content="<p>edited by ai</p>"
+        ):
             with TestClient(api.app) as client:
-                version = client.get("/document/1").json()
+                version = latest_version(client)
                 response = client.post(
                     f"/document/1/version/{version['id']}/ai/write",
                     json={
@@ -111,17 +178,60 @@ class ApiTestCase(unittest.TestCase):
                 self.assertEqual(
                     response.json()["document"]["content"], "<p>edited by ai</p>"
                 )
-
-                saved_version = client.get(
-                    f"/document/1/version/{version['id']}"
-                ).json()
+                saved_version = client.get(f"/document/1/version/{version['id']}").json()
                 self.assertEqual(saved_version["content"], "<p>edited by ai</p>")
-        finally:
-            api.generate_ai_response = original_generate_ai_response
+
+    def test_get_ai_messages(self):
+        with mocked_ai_response(reply="Stored response"):
+            with TestClient(api.app) as client:
+                version = latest_version(client)
+                client.post(
+                    f"/document/1/version/{version['id']}/ai/write",
+                    json={
+                        "instruction": "Summarize",
+                        "title": version["title"],
+                        "content": version["content"],
+                    },
+                )
+
+                response = client.get(
+                    f"/document/1/version/{version['id']}/ai/messages"
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    [message["role"] for message in response.json()],
+                    ["user", "assistant"],
+                )
+                self.assertEqual(response.json()[1]["content"], "Stored response")
+
+    def test_delete_ai_messages(self):
+        with mocked_ai_response():
+            with TestClient(api.app) as client:
+                version = latest_version(client)
+                client.post(
+                    f"/document/1/version/{version['id']}/ai/write",
+                    json={
+                        "instruction": "Summarize",
+                        "title": version["title"],
+                        "content": version["content"],
+                    },
+                )
+
+                response = client.delete(
+                    f"/document/1/version/{version['id']}/ai/messages"
+                )
+                messages = client.get(
+                    f"/document/1/version/{version['id']}/ai/messages"
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), [])
+                self.assertEqual(messages.json(), [])
 
     def test_rejects_too_many_context_files(self):
         with TestClient(api.app) as client:
-            version = client.get("/document/1").json()
+            version = latest_version(client)
             response = client.post(
                 f"/document/1/version/{version['id']}/ai/write",
                 json={
